@@ -1,0 +1,16 @@
+OberVave + XPOSE : simulateur navigateur
+
+1. Ouvre un terminal dans CE dossier et lance :   python3 -m http.server 8737
+2. Ouvre http://localhost:8737 dans Chrome / Edge / Firefox, clique une fois sur la page pour activer le son.
+   (Ne pas ouvrir index.html en double-cliquant : le navigateur bloque le son dans ce cas.)
+
+Clavier de l'ordinateur : notes  Z S X D C V G B H N J M , L . ; /  = do4 (C4) et au-dessus
+                                 Q 2 W 3 E 4 R = fa3 .. si3 ;  I 9 O = fa5 .. sol5
+Boutons : 0 = SEQ   = (egal) = GLO   \ = REC   Espace = PLAY   fleches gauche/droite = OCT- / OCT+
+
+Test rapide de XPOSE :
+ a) Appuie sur 0 deux fois (vue STEPS), puis joue Z, C, V, X : chaque touche ecrit un pas. Espace = PLAY.
+ b) Transposition live : MAINTIENS 0 et = ensemble, appuie sur D (+3), puis relache. Z remet 0.
+ c) Piste de transposition : maintiens 0 + =, tourne le potard 3 (LENGTH) vers le haut (molette ou glisser).
+    Appuie sur \ (REC) pendant la lecture, maintiens 0 + = et joue D, puis X... : les valeurs s'ecrivent.
+    Relache REC : la piste se rejoue en boucle. Maintenir \ 1,2 s dans la couche vide la piste.
