@@ -124,7 +124,7 @@ enum { CLICK_OFF, CLICK_REC, CLICK_ON, CLICK_COUNT, NCLICK };   /* COUNT: as REC
 static const char *const CLICK_NAME[NCLICK] = {"OFF", "REC", "ON", "COUNT-IN"};
 /* the panel as sloopDX's: a function button tapped (let go, nothing else touched) opens its pages; held, it is a
  * layer (the keys and knobs change job until it is let go; HOME tapped while it is held locks it open) */
-enum { L_NONE, L_SEQ, L_EDIT, L_GLO, L_SAVE, L_FX };
+enum { L_NONE, L_SEQ, L_EDIT, L_GLO, L_SAVE, L_FX, L_XP };   /* L_XP (3.1): SEQ and GLO held together, the transposition */
 static uint32_t layer, layer_lock, layer_used, layer_t, layer_btn, rec_from_arp;
 #if BOARD_SMK37
 /* the SMK-37's step pads (obv_smk.h): held pads, the velocity a new step gets; a pad held 250 ms shows its step */
@@ -555,11 +555,11 @@ static uint32_t auto_hold_t[NTRK][NLANE];
 static void auto_rec(uint32_t p)
 {
     static char m[32];
-    uint32_t t = seq_trk % NTRK, l, f = NLANE, len = pat.trk[t].len;
+    uint32_t t = seq_trk % NTRK, l, nl = t == NTRK - 1u ? NLANE - 1u : NLANE, f = nl, len = pat.trk[t].len;   /* (3.1: D's last lane is the transposition track's) */
     if (rec != REC_ON || !ctl_seq_run || !len || !(ctl_trk_on >> t & 1u) || is_a_only(p) || p >= NPARAM) return;
-    for (l = 0; l < NLANE; l++) { if (pat.lane[t][l].param == p) break; if (f == NLANE && pat.lane[t][l].param == AUTO_NONE) f = l; }
-    if (l == NLANE) {
-        if (f == NLANE) { m[0] = 0; scat(m, "TRACK "); m[6] = TRK_L[t]; m[7] = 0; scat(m, ": 4 KNOBS RECORDED"); say(m); return; }
+    for (l = 0; l < nl; l++) { if (pat.lane[t][l].param == p) break; if (f == nl && pat.lane[t][l].param == AUTO_NONE) f = l; }
+    if (l == nl) {
+        if (f == nl) { m[0] = 0; scat(m, "TRACK "); m[6] = TRK_L[t]; m[7] = 0; scat(m, nl == NLANE ? ": 4 KNOBS RECORDED" : ": 3 KNOBS RECORDED"); say(m); return; }
         l = f; lane_clear(&pat.lane[t][l]); pat.lane[t][l].param = (uint8_t)p;
     }
     pat.lane[t][l].v[ui_seq_pos[t] % len] = live_p[t].v[p];
@@ -822,6 +822,14 @@ static void layer_knob(knob_view_t *k, uint32_t i)
         uint32_t p2 = (uint32_t)FXP[i];
         k->present = 1; k->label = PDEF[p2].name; k->v = live.v[p2]; k->max = PDEF[p2].max;   /* (the effects: A's) */
         param_value(k->value, p2, live.v[p2]);
+    } else if (layer == L_XP) {                 /* (3.1) TARGET (A-D), QUANT, LENGTH, DIV of the transposition track */
+        static const char *const LX[4] = {"TARGET", "QUANT", "LENGTH", "DIV"}, *const XQ[3] = {"NOW", "BEAT", "BAR"};
+        uint32_t m = xp_mask(), b;
+        k->present = 1; k->label = LX[i]; k->value[0] = 0; k->max = 1;
+        if (i == 0u) { for (b = 0; b < NTRK; b++) { k->value[b] = m >> b & 1u ? TRK_L[b] : '-'; } k->value[NTRK] = 0; k->v = m; k->max = 15; }
+        else if (i == 1u) { scat(k->value, XQ[xp_quant()]); k->v = xp_quant(); k->max = 2; }
+        else if (i == 2u) { if (xp_len()) fmt_u(k->value, xp_len()); else scat(k->value, "OFF"); k->v = xp_len(); k->max = XP_MAXLEN; }
+        else { scat(k->value, DIV_NAME[xp_div()]); k->v = xp_div(); k->max = NDIV - 1; }
     }
 }
 
@@ -868,7 +876,7 @@ static void draw_page(void)
             else if (i == 1) { scat(k[i].value, CLICK_NAME[set.click % NCLICK]); k[i].v = set.click % NCLICK; k[i].max = NCLICK - 1; }
             else if (i == 2) { if (set.midi_ch) fmt_u(k[i].value, set.midi_ch); else scat(k[i].value, "OMNI"); k[i].v = set.midi_ch; k[i].max = 16; }
             else { scat(k[i].value, set.tune < 0 ? "-" : "+"); fmt_u(k[i].value + 1, (uint32_t)(set.tune < 0 ? -set.tune : set.tune)); scat(k[i].value, "c"); k[i].v = set.tune + 50; k[i].max = 100; k[i].bip = 1; }
-        } else if (layer == L_EDIT || layer == L_FX || layer == L_GLO || layer == L_SAVE) {
+        } else if (layer == L_EDIT || layer == L_FX || layer == L_GLO || layer == L_SAVE || layer == L_XP) {
             layer_knob(&k[i], i);
         } else if (seq_shown()) {
             seq_knob(&k[i], i);
@@ -886,6 +894,7 @@ static void draw_page(void)
         const char *t = pg->title;
         if (layer == L_EDIT) { title[0] = 0; scat(title, "EDIT "); title[5] = TRK_L[seq_trk % NTRK]; title[6] = 0; scat(title, ": ERASE"); t = title; }
         else if (page == PG_MIXER && !layer) t = mix_row == 0u ? "MIXER  LEVEL" : mix_row == 1u ? "MIXER  PAN" : mix_row == 2u ? "SEND  CHORUS" : mix_row == 3u ? "SEND  DELAY" : mix_row == 4u ? "SEND  REVERB" : mix_row == 5u ? "SEND  DRIVE" : "MASTER";
+        else if (layer == L_XP) { title[0] = 0; scat(title, "XPOSE "); fmt_s(title + slen(title), ui_xp_now); t = title; }
         else if (layer == L_GLO) t = "GLO: MUTE SOLO TAP";
         else if (layer == L_SAVE) t = "SAVE: PATTERNS";
         else if (layer == L_FX) t = "FX MIX";
@@ -955,6 +964,7 @@ static void draw_hints(void)
     else if (step_held >= 0) ui_hints("KNOB: EDIT  TAP LATER: LONG", "NOTE  LEVEL  RATCHET  GATE", C_AMBER);
     else if (layer == L_SEQ) ui_hints("WHITE KEYS = STEPS  OCT: PAGE", "F#3-A#4: PAGE 1-8 " NM_HOME ": LOCK", C_AMBER);
     else if (layer == L_EDIT) ui_hints("KEY: ERASE THAT NOTE", "OCT-: UNDO  OCT+: REDO", C_AMBER);
+    else if (layer == L_XP) ui_hints("KEYS: TRANSPOSE  C4 = 0", xp_len() ? "REC: RECORD  OCT: RANGE" : "K3: LENGTH FOR A TRACK", C_AMBER);
     else if (layer == L_GLO) ui_hints(rec ? "1-4: RECORD A-D  5-8: MUTE" : "1-4: START/STOP A-D 5-8: MUTE", "9-12: SOLO  G5: TAP TEMPO", C_AMBER);
     else if (layer == L_SAVE) ui_hints("WHITE 1-8: GO  BLACK 1-8: COPY", "+ " NM_SELBTN " PRESSED: NEW SOUND", C_AMBER);
     else if (layer == L_FX) ui_hints("KNOBS: CHORUS DELAY REVERB", "AND THE DELAY'S TIME", C_AMBER);
@@ -1534,6 +1544,7 @@ static void seq_info_line(char *s, uint16_t *c)
     if (layer == L_EDIT) { scat(s, "KEY: ERASE  OCT: UNDO/REDO"); return; }
     if (layer == L_SAVE) { scat(s, "WHITE 1-8: GO  BLACK: COPY"); return; }
     if (layer == L_GLO) { scat(s, "1-4 START  5-8 MUTE  9-12 SOLO"); return; }
+    if (layer == L_XP) { scat(s, "XPOSE "); fmt_s(s + slen(s), ui_xp_now); scat(s, "  KEYS: C4 = 0"); return; }
     if (layer) { scat(s, "LET GO: BACK"); return; }
     *c = C_CREAM;
     if (seq_view == SV_TRACK) {
@@ -1728,12 +1739,13 @@ static uint32_t cycle_page(uint32_t first, uint32_t count)   /* a button steps t
     return first;
 }
 
+static void xp_key(uint32_t note);               /* (3.1) the XPOSE layer key, below */
 static void keys_in(uint32_t notes_only)
 {
     uint32_t keys = fm1_in.notes, down = keys & ~keys_prev, up = keys_prev & ~keys, base = (uint32_t)(KEY0 + 12 * set.oct), k;
     for (k = 0; k < 27u; k++) {             /* the keys by layer: EDIT erases, SEQ steps, GLO mix, SAVE patterns; else notes */
         if (down >> k & 1u) {
-            uint32_t ks = layer == L_EDIT ? 2u : steps_on() ? 1u : layer == L_GLO ? 3u : layer == L_SAVE ? 4u : 0u;
+            uint32_t ks = layer == L_XP ? 5u : layer == L_EDIT ? 2u : steps_on() ? 1u : layer == L_GLO ? 3u : layer == L_SAVE ? 4u : 0u;
             if (notes_only && ks) continue;     /* not a note: the main loop's (its bit stays new) */
             keys_prev |= 1u << k;
             held_key[k] = (uint8_t)(base + k);
@@ -1745,6 +1757,7 @@ static void keys_in(uint32_t notes_only)
                 say("ERASED");
             } else if (key_step[k] == 1u) seq_key_down(k);
             else if (key_step[k] == 3u) { glo_key(k); layer_used = 1; }
+            else if (key_step[k] == 5u) { xp_key(held_key[k]); layer_used = 1; }   /* XPOSE held: the key transposes */
             else if (key_step[k] == 4u) {   /* SAVE held: white keys 1-8 = pattern 1-8 */
                 static char msg[16];
                 layer_used = 1;
@@ -1937,11 +1950,69 @@ static void trk_clear(void)
     uint32_t n;
     undo_save();
     for (n = 0; n < pat.trk[seq_trk].len; n++) step_clear(seq_step(seq_trk, n));
-    for (n = 0; n < NLANE; n++) lane_clear(&pat.lane[seq_trk % NTRK][n]);
+    for (n = 0; n < NLANE; n++)
+        if (!(seq_trk % NTRK == NTRK - 1u && n == NLANE - 1u && pat.lane[NTRK - 1u][NLANE - 1u].param == XP_LANE))   /* (3.1: not the transposition track) */
+            lane_clear(&pat.lane[seq_trk % NTRK][n]);
     pat_edited = 1;
     if (rec == REC_ON) { rec = ctl_seq_run ? REC_READY : REC_OFF; rec_wait = 0; }
     memset(rec_open, 0, sizeof rec_open);
     m[0] = 0; scat(m, "TRACK "); m[6] = TRK_L[seq_trk % NTRK]; m[7] = 0; scat(m, " CLEARED"); say(m);
+    dirty_tags = dirty_steps = dirty_page = 1;
+}
+/* ---- (3.1) the XPOSE layer: SEQ and GLO held together. The keys transpose the tracks it targets in real time (the key
+ * C4 = 0, OCT- / OCT+ move the range; the last one stays until another is pressed). With REC on and the sequencer
+ * playing, a key is written onto the transposition track's step (the nearest one) instead and the track holds it from
+ * there: overdub as many times as you like. KNOBS: TARGET (which of A-D), QUANT (a live change goes in now / on the
+ * beat / on the bar), LENGTH (0 = the track is off), DIV. REC held 1.2 s empties the track. */
+static void xp_key(uint32_t note)
+{
+    static char m[28];
+    int32_t x = clampi((int32_t)note - 60, -24, 24);
+    uint32_t len = xp_len();
+    m[0] = 0;
+    if (rec == REC_ON && ctl_seq_run && !ctl_count && len && xp_lane_free()) {   /* recorded: onto the nearest step */
+        uint32_t n = ui_xp_frac >= 128u ? ui_xp_pos + 1u : ui_xp_pos;
+        if (n >= len) n = 0;
+        XPL().v[n] = (uint8_t)(x + XP_BIAS);
+        ctl_xp_set = x; ctl_xp_set_gen++;
+        ctl_xp_live = 0;
+        pat_edited = 1;
+        scat(m, "REC XPOSE ");
+    } else {
+        ctl_xp_live = x;
+        scat(m, "XPOSE ");
+        if (rec == REC_ON && ctl_seq_run && !len) scat(m, "(NO TRACK: LENGTH) ");
+    }
+    fmt_s(m + slen(m), x);
+    say(m);
+}
+static void xp_turn(uint32_t knob, int32_t e)
+{
+    lane_t *a;
+    int32_t sg = e > 0 ? 1 : -1;
+    layer_used = 1;
+    if (!xp_lane_free()) { say("XPOSE TRACK: LANE BUSY"); return; }   /* (a pattern from 3.0 that used all four knob lanes on D) */
+    xp_make();
+    a = &XPL();
+    if (knob == 0u) a->pad[2] = (uint8_t)((a->pad[2] & 0xF0u) | (uint32_t)clampi((int32_t)(a->pad[2] & 15u) + sg, 1, 15));
+    else if (knob == 1u) a->pad[2] = (uint8_t)((a->pad[2] & 15u) | (uint32_t)clampi((int32_t)(a->pad[2] >> 4 & 3u) + sg, 0, 2) << 4);
+    else if (knob == 2u) {
+        int32_t l = (int32_t)a->pad[0];
+        if (!l && e > 0) l = 16;                /* (switched on: 16 steps) */
+        else if (e > 1 || e < -1) l = e > 0 ? (l / 4 + 1) * 4 : (l - 1) / 4 * 4;   /* fast: by 4 */
+        else l += e;
+        a->pad[0] = (uint8_t)clampi(l, 0, (int32_t)XP_MAXLEN);
+    } else a->pad[1] = (uint8_t)clampi((int32_t)(a->pad[1] % NDIV) + sg, 0, NDIV - 1);
+    pat_edited = 1;
+}
+static void xp_clear(void)                      /* REC held in the XPOSE layer: the track emptied (one undo), the live offset back to 0 */
+{
+    uint32_t n;
+    undo_save();
+    if (xp_active()) for (n = 0; n < SEQ_STEPS; n++) XPL().v[n] = XP_NONE;
+    ctl_xp_live = 0; ctl_xp_set = 0; ctl_xp_set_gen++;
+    pat_edited = 1;
+    say("XPOSE TRACK CLEARED");
     dirty_tags = dirty_steps = dirty_page = 1;
 }
 static void app_main(void)
@@ -2072,6 +2143,12 @@ static void app_main(void)
             static const uint8_t LL[5] = {L_SEQ, L_EDIT, L_GLO, L_SAVE, L_FX};
             static uint32_t dead;               /* a press that only unlocked: its release does nothing */
             for (k = 0; k < 5u; k++) {
+                if (b & (1u << LB[k]) && !layer_lock && ((layer == L_SEQ && LB[k] == BTN_GLO) || (layer == L_GLO && LB[k] == BTN_SEQ))) {
+                    layer = L_XP; layer_used = 1; layer_t = fm1_ms;   /* (3.1) SEQ and GLO held together: XPOSE */
+                    step_held = -1; audition_off(); entry_reset();
+                    dirty_page = dirty_steps = dirty_tags = 1; hints_key = 0xFFFFFFFFu; leds_q = 0xFFFFFFFFu;
+                    continue;
+                }
                 if (b & (1u << LB[k])) {
                     if (layer_lock) { layer = L_NONE; layer_lock = 0; dead |= 1u << LB[k]; }
                     else { layer = LL[k]; layer_used = 0; layer_t = fm1_ms; layer_btn = LB[k]; }
@@ -2079,6 +2156,13 @@ static void app_main(void)
                     dirty_page = dirty_steps = dirty_tags = 1; hints_key = 0xFFFFFFFFu; leds_q = 0xFFFFFFFFu;
                 }
                 if (rel & (1u << LB[k])) {
+                    if (layer == L_XP && !layer_lock && (LB[k] == BTN_SEQ || LB[k] == BTN_GLO)) {   /* XPOSE: either button let go ends it */
+                        layer = L_NONE;
+                        memset(erase_on, 0, sizeof erase_on);
+                        step_held = -1; audition_off();
+                        dirty_page = dirty_steps = dirty_tags = 1; hints_key = 0xFFFFFFFFu; leds_q = 0xFFFFFFFFu;
+                        continue;
+                    }
                     if (dead & (1u << LB[k])) { dead &= ~(1u << LB[k]); continue; }
                     if (layer != LL[k] || layer_lock) continue;
                     if (!layer_used && fm1_ms - layer_t < 600u) {   /* a tap: the button's pages */
@@ -2173,7 +2257,7 @@ static void app_main(void)
         }
         if (b & (1u << BTN_REC)) { rec_down = 1; rec_down_t = fm1_ms; }   /* REC acts when let go; held 1.2 s it clears the track */
         if (rec_down && fm1_ms - rec_down_t > 1200u) {
-            trk_clear();
+            if (layer == L_XP) xp_clear(); else trk_clear();
             rec_down = 0;
             leds_q = 0xFFFFFFFFu;
         }
@@ -2290,6 +2374,9 @@ static void app_main(void)
                 layer_used = 1;
                 set_param((uint32_t)FXP[k], (int32_t)live.v[FXP[k]] + (FXP[k] == P_DLY_TIME ? (e > 0 ? 1 : -1) : e * 2));
                 dirty_tags = 1;
+            } else if (layer == L_XP) {
+                xp_turn(k, e);
+                dirty_steps = 1;
             } else if (layer == L_GLO || layer == L_SAVE) {
                 ;
             } else if (seq_shown()) {
@@ -2332,6 +2419,10 @@ static void app_main(void)
                     if ((uint32_t)KEY_PAGE[k] == seq_pg[t]) lit |= 1u << k; else glow |= 1u << k;
                 }
             }
+        } else if (layer == L_XP) {             /* (3.1) C4 glows (0); the key of the transposition in force is lit */
+            int32_t kk = 60 - (int32_t)base, now = (int32_t)ui_xp_now;
+            if (kk >= 0 && kk < 27) glow |= 1u << kk;
+            if (kk + now >= 0 && kk + now < 27) lit |= 1u << (kk + now);
         } else if (layer == L_GLO) {            /* 1-4 lit: playing (blinking: on the bar); 5-8 muted; 9-12 solo; G5 the beat */
             static const uint8_t WK[16] = {0, 2, 4, 6, 7, 9, 11, 12, 14, 16, 18, 19, 21, 23, 24, 26};
             for (k = 0; k < NTRK; k++) {

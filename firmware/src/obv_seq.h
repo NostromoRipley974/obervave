@@ -89,6 +89,33 @@ static void pat_factory(uint32_t n, pattern_t *p)   /* a pattern never saved: em
     pat_init(p);
 }
 
+/* ---- (3.1) the transposition track: a fifth, lighter track that holds a transposition (in semitones) per step, with its
+ * own length and note value (so it loops against the notes' tracks as a polymeter), and moves the tracks it targets as
+ * it plays. It lives in the LAST lane of the last track (lane[NTRK-1][NLANE-1]) so that the pattern keeps its size: a
+ * pattern saved by 3.0 loads as it was (that lane is empty), and 3.0 skips this lane (its param is >= NPARAM).
+ *   lane.param  XP_LANE when the track is made (AUTO_NONE: not yet; anything else: an old recorded knob sits there)
+ *   lane.pad[0] length in steps, 0 = off (1..255)      lane.pad[1] note value (D_4 ..)
+ *   lane.pad[2] bits 0-3: the tracks A-D it moves (default all), bits 4-5: when a LIVE change goes in (0 now, 1 beat, 2 bar)
+ *   lane.v[i]   transposition + XP_BIAS on step i; XP_NONE: that step changes nothing (the last value goes on) */
+#define XP_LANE 0xFEu
+#define XP_NONE AUTO_NONE
+#define XP_BIAS 64
+#define XP_MAXLEN 255u
+#define XPL() (pat.lane[NTRK - 1u][NLANE - 1u])
+static uint32_t xp_lane_free(void) { return XPL().param == AUTO_NONE || XPL().param == XP_LANE; }   /* the lane is ours to use */
+static uint32_t xp_active(void) { return XPL().param == XP_LANE; }
+static uint32_t xp_len(void) { return xp_active() ? XPL().pad[0] : 0u; }
+static uint32_t xp_div(void) { return xp_active() ? XPL().pad[1] % NDIV : (uint32_t)D_4; }
+static uint32_t xp_mask(void) { return xp_active() ? XPL().pad[2] & 15u : 15u; }
+static uint32_t xp_quant(void) { return xp_active() ? (XPL().pad[2] >> 4 & 3u) % 3u : 0u; }
+static void xp_make(void)                       /* (main loop) the track is made on first use, empty, off, all four tracks */
+{
+    lane_t *a = &XPL();
+    if (a->param == XP_LANE || a->param != AUTO_NONE) return;
+    lane_clear(a);
+    a->param = XP_LANE; a->pad[0] = 0; a->pad[1] = D_4; a->pad[2] = 15;
+}
+
 /* ---- the player (ISR, per CTL block) */
 #define NO_WAIT 0xFFFFFFFFu
 typedef struct { uint32_t cnt, dur, step, sub, rat_n, rat_i, gate_at, nsnd, play, tie, wait, on_at, hold_end, frac; uint8_t snd[SEQ_CHORD]; } seqrun_t;   /* hold_end: a late note's end in the next step */
@@ -217,29 +244,84 @@ static void seq_auto(uint32_t t, uint32_t i)
         live_p[t].v[a->param] = v;
     }
 }
+/* (3.1) the transposition's player. ctl_xp_live: what the hand asks (the main loop's), taken at once, on a beat or on the
+ * bar (xp_quant); ctl_xp_set: a value the main loop has just recorded, which the track holds from now on (the step it was
+ * written on is already begun). A track plays its notes + its own transposition + (if the track is targeted) both. */
+typedef struct { uint32_t cnt, dur, step, frac; } xprun_t;
+static xprun_t xr;
+static volatile int32_t ctl_xp_live, ctl_xp_set;
+static volatile uint32_t ctl_xp_set_gen;
+static uint32_t xp_set_seen, xp_bar_blk;        /* xp_bar_blk: this block begins a bar (the track starts only there: in step with the notes) */
+static int32_t xp_live_ap, xp_trk;               /* ISR: the live offset in force, the track's value now */
+static volatile int32_t ui_xp_now;              /* ISR -> UI: the sum the targeted tracks are moved by */
+static volatile uint32_t ui_xp_pos, ui_xp_frac; /* the track's step, and how far into it (Q8) */
+static void xp_from_top(void) { xr.cnt = xr.dur = xr.frac = 0; xr.step = 0xFFFFFFFFu; xp_trk = 0; }
+static int32_t xp_for(uint32_t t) { return xp_mask() >> t & 1u ? xp_live_ap + xp_trk : 0; }
+static void xp_commit(uint32_t beat, uint32_t bar)   /* the live change goes in: now, on the next beat, or on the bar */
+{
+    uint32_t m = xp_quant();
+    if (xp_live_ap == ctl_xp_live) return;
+    if (m == 0u || (m == 1u && beat) || (m == 2u && bar)) { xp_live_ap = ctl_xp_live; TRACE('L', m, (uint32_t)xp_live_ap); }
+}
+static void xp_tick(uint32_t q)                 /* the track's own steps (q: the quarter's length in frames) */
+{
+    const lane_t *a = &XPL();
+    uint32_t len = a->param == XP_LANE ? a->pad[0] : 0u;
+    if (!len) { xp_trk = 0; xr.step = 0xFFFFFFFFu; xr.cnt = xr.dur = xr.frac = 0; ui_xp_now = xp_live_ap; return; }
+    if (xr.step == 0xFFFFFFFFu && !xp_bar_blk) {   /* made or switched on while playing: it waits for the next bar */
+        ui_xp_pos = 0; ui_xp_frac = 0; ui_xp_now = xp_live_ap + xp_trk;
+        return;
+    }
+    if (xr.cnt >= xr.dur) {
+        uint32_t dv = DIV_PER_QUARTER[a->pad[1] % NDIV], base = q / dv;
+        uint8_t v;
+        xr.frac += q % dv;                      /* (the rest of q spread over the steps, as the tracks' steps) */
+        if (xr.frac >= dv) { xr.frac -= dv; base++; }
+        xr.cnt -= xr.dur;
+        xr.step = xr.step + 1u >= len ? 0u : xr.step + 1u;
+        xr.dur = base < CTL ? CTL : base;
+        if (!xr.step) xp_trk = 0;               /* (every round starts from 0 unless step 1 says otherwise: each pass sounds the same) */
+        v = a->v[xr.step];
+        if (v != XP_NONE) xp_trk = (int32_t)v - XP_BIAS;
+        TRACE('X', xr.step, (uint32_t)xp_trk);
+    }
+    xr.cnt += CTL;
+    ui_xp_pos = xr.step;
+    ui_xp_frac = xr.dur ? xr.cnt * 256u / xr.dur : 0u;
+    ui_xp_now = xp_live_ap + xp_trk;
+}
+
 static void seq_tick(void)
 {
     uint32_t t, q;
+    if (ctl_xp_set_gen != xp_set_seen) { xp_set_seen = ctl_xp_set_gen; xp_trk = ctl_xp_set; }   /* (a recorded value: held from now) */
     if (!ctl_seq_run) {
         if (seq_was) { for (t = 0; t < NTRK; t++) seq_release_t(t); seq_was = 0; }
         seq_take_requests();                    /* (stopped: a pad switches its track at once) */
+        xp_live_ap = ctl_xp_live;               /* (stopped: the hand's transposition at once, the track at its start) */
+        xp_trk = 0; xr.step = 0xFFFFFFFFu; xr.cnt = xr.dur = xr.frac = 0;
+        ui_xp_now = xp_live_ap;
         return;
     }
     if (!seq_was || ctl_seq_restart) {          /* start: step 1 of every track in this block */
         ctl_seq_restart = 0;
         seq_take_requests();
         for (t = 0; t < NTRK; t++) seq_from_top(t);
+        xp_from_top();
         seq_beat_cnt = 0;
         seq_beat_n = 0;
         count_left = ctl_count ? 4u : 0u;
         seq_was = 1;
     }
     q = quarter_len();
+    xp_bar_blk = 0;
+    xp_commit(0u, 0u);                          /* (quantise NOW: in this block) */
     if (seq_beat_cnt < CTL) {                   /* a beat (in this block): the PLAY light, the click, the count-in; a downbeat: requests */
         if (ctl_count && !count_left) {         /* counted in: the tracks from the top, now */
             ctl_count = 0;
             seq_beat_n = 0;
             for (t = 0; t < NTRK; t++) seq_from_top(t);
+        xp_from_top();
         }
         if (!ctl_count && seq_beat_n % BAR_BEATS == 0u) {   /* the bar's first beat: what waited for it */
             if (ctl_pat_swap == 1u) {           /* (the ISR is never interrupted by the main loop: no lock needed) */
@@ -253,9 +335,12 @@ static void seq_tick(void)
                 ctl_pat_swap = 0;
                 ui_pat_swapped++;
                 for (t = 0; t < NTRK; t++) seq_from_top(t);
+        xp_from_top();
             }
             seq_take_requests();
         }
+        xp_bar_blk = !ctl_count && seq_beat_n % BAR_BEATS == 0u;
+        xp_commit(1u, xp_bar_blk);              /* (on the beat; on the bar) */
         ui_seq_beat++;
         ui_seq_bar_beat = seq_beat_n % BAR_BEATS;
         if (ctl_click || ctl_count) click_start(seq_beat_n % BAR_BEATS == 0u);
@@ -267,11 +352,13 @@ static void seq_tick(void)
     if (seq_beat_cnt >= q)                      /* the next beat: what is over keeps going (a DAW's quarter is any length) */
         seq_beat_cnt = seq_beat_cnt - q < CTL ? seq_beat_cnt - q : 0u;
     if (ctl_count) return;                      /* counting in: no steps yet */
+    xp_tick(q);                                 /* (3.1) the transposition track, then every track with its share of it */
     for (t = 0; t < NTRK; t++) {
         seqrun_t *r = &sr[t];
         const seqtrk_t *k = &pat.trk[t];
         const step_t *s;
         uint32_t len = k->len;
+        int32_t tp = (int32_t)k->transp + xp_for(t);
         if (!len || !(ctl_trk_on >> t & 1u)) { seq_release_t(t); r->tie = 0; r->wait = NO_WAIT; r->hold_end = 0; continue; }
         if (r->cnt >= r->dur) {                 /* the next step */
             uint32_t dv = DIV_PER_QUARTER[k->div % NDIV], base = q / dv, sw, carry = 0;
@@ -298,11 +385,11 @@ static void seq_tick(void)
                 r->on_at = (r->dur * s->nudge) >> 7;
                 r->wait = r->on_at;
             } else if (r->tie)                  /* a tie: the notes the step plays again hold */
-                seq_tie_into(t, s, k->transp, r->play);
+                seq_tie_into(t, s, tp, r->play);
             else {
                 if (r->play) carry = 0;
                 if (!carry) seq_release_t(t);
-                if (r->play) seq_sound(t, s, k->transp);
+                if (r->play) seq_sound(t, s, tp);
             }
             r->hold_end = carry;
             r->rat_n = (s->ratch & 3u) + 1u;
@@ -316,10 +403,10 @@ static void seq_tick(void)
             ui_seq_ticks++;
         } else {
             s = seq_step(t, r->step < len ? r->step : 0u);
-            if (r->wait != NO_WAIT && r->cnt >= r->wait) { r->wait = NO_WAIT; r->hold_end = 0; seq_release_t(t); seq_sound(t, s, k->transp); }   /* a nudged step: now */
+            if (r->wait != NO_WAIT && r->cnt >= r->wait) { r->wait = NO_WAIT; r->hold_end = 0; seq_release_t(t); seq_sound(t, s, tp); }   /* a nudged step: now */
             else if (r->wait == NO_WAIT && r->play && r->rat_n > 1u && r->sub) {   /* a ratchet: the next hit */
                 uint32_t i = (r->cnt - r->on_at) / r->sub;
-                if (i > r->rat_i && i < r->rat_n) { r->rat_i = i; seq_release_t(t); seq_sound(t, s, k->transp); }
+                if (i > r->rat_i && i < r->rat_n) { r->rat_i = i; seq_release_t(t); seq_sound(t, s, tp); }
             }
         }
         if (r->hold_end && r->cnt >= r->hold_end) { r->hold_end = 0; seq_release_t(t); }   /* a late note from the step before: its end */
